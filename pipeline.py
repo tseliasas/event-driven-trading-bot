@@ -77,7 +77,7 @@ def build_episodic_dataset():
     
     # 2. Load the continuous Bitcoin data
     print("Loading Binance BTC data...")
-    btc_df = pd.read_csv("BTCUSDT_1m_2Y.csv")
+    btc_df = pd.read_csv("BTCUSDT_1m_full.csv") # 2017 -> 2026, made by download_btc_history.py
     btc_df['timestamp'] = pd.to_datetime(btc_df['timestamp'])
     
     # We must set the timestamp as the index to quickly slice the 120-minute windows
