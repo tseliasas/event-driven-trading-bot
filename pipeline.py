@@ -5,30 +5,26 @@ def clean_economic_data(csv_path="Economic_calendar_US.csv"):
     print("Loading and cleaning Economic Calendar...")
     df = pd.read_csv(csv_path)
     
-    # 1. Filter for US Dollar events and drop "All Day" times
+    # filter usd data and filter all day news events out
     df = df[df['currency'] == 'USD'].copy()
     df = df[df['time'] != 'All Day'].copy()
     
-    # 2. Fix the Timezone (EST to UTC)
+    # glue date and time together so we can turn it into a real datetime
     df['datetime_str'] = df['date'] + ' ' + df['time']
     
-    # Use errors='coerce' to turn "Tentative" strings into NaT (Not a Time)
+    # errors='coerce' just so it doesnt crash when we find strings we cant parse i.e "Tentative"
     df['datetime'] = pd.to_datetime(df['datetime_str'], dayfirst=True, errors='coerce')
+    df = df.dropna(subset=['datetime']).copy() # Drop rows where listed columns are NaT/NaN
     
-    # Drop the rows that couldn't be parsed
-    df = df.dropna(subset=['datetime']).copy()
+    # The calendar is NOT in Eastern time, it's a fixed UTC+1 clock (no daylight saving)
+    # e.g. CPI drops at 8:30 ET but shows up here as 13:30 in summer and 14:30 in winter
+    # So we just take 1 hour off to get UTC, which is what Binance uses
+    df['datetime'] = df['datetime'] - pd.Timedelta(hours=1)
     
-    # Localize to Eastern Time, then convert to UTC to match Binance
-    df['datetime'] = df['datetime'].dt.tz_localize('US/Eastern', ambiguous='NaT', nonexistent='shift_forward')
-    df['datetime'] = df['datetime'].dt.tz_convert('UTC')
-    
-    # Remove the timezone "awareness" so it matches the naive Binance timestamps perfectly
-    df['datetime'] = df['datetime'].dt.tz_localize(None)
-    
-    # 3. Build a parser for strings like "3.5%", "250K", "-1.2M"
+
     def parse_value(val):
         if pd.isna(val):
-            return np.nan
+            return np.nan # Return not a number if its missing
         val = str(val).strip().upper()
         multiplier = 1
         
@@ -44,25 +40,24 @@ def clean_economic_data(csv_path="Economic_calendar_US.csv"):
             val = val.replace('B', '')
             multiplier = 1_000_000_000
             
-        try:
+        try: # Just throw not a number if we still cant change it to float
             return float(val) * multiplier
         except ValueError:
             return np.nan
 
-    # Apply the parser to the Actual and Forecast columns
+    
     df['actual_num'] = df['actual'].apply(parse_value)
     df['forecast_num'] = df['forecast'].apply(parse_value)
     
-    # 4. ENGINEER THE CORE FEATURE: Surprise Factor
+    # Will probably be used to train our finak model
     df['surprise'] = df['actual_num'] - df['forecast_num']
     
-    # Drop rows where we couldn't calculate a surprise (e.g., missing forecast)
+    # If you couldnt calculate the surprise just drop it altogether
     df = df.dropna(subset=['surprise']).copy()
-    
-    # Sort chronologically
+
     df = df.sort_values('datetime').reset_index(drop=True)
     
-    # Keep only what we need for the ML model
+    # Keep only what we need for the model
     df = df[['datetime', 'event', 'importance', 'actual', 'forecast', 'surprise']]
     
     return df
@@ -122,7 +117,7 @@ def build_episodic_dataset():
         except KeyError:
             # If the exact T=0 candle is missing, skip the episode
             continue
-            
+
         # 7. Engineer the Dynamic Target (For rows after T=0)
         # If I enter a trade right now, what is the return at the end of the episode (T+60)?
         price_at_end = episode_df.iloc[-1]['close']
