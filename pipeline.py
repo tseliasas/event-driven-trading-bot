@@ -123,7 +123,37 @@ def build_episodic_dataset():
             # If the exact T=0 candle is missing, skip the episode
             continue
 
-        # 7. Engineer the Dynamic Target (For rows after T=0)
+        # 7. PRE-NEWS CONTEXT (what the market was doing in the hour before the news)
+        # We stop at T-1 on purpose, the T=0 candle already has the first reaction to the news inside it
+        pre_news = episode_df[(episode_df['minutes_from_release'] >= -60) & (episode_df['minutes_from_release'] <= -1)]
+
+        # Was BTC pumping or dumping into the news? (open of the first pre-news candle -> close of the last one)
+        episode_df['pre_news_return_pct'] = (pre_news['close'].iloc[-1] - pre_news['open'].iloc[0]) / pre_news['open'].iloc[0] * 100
+
+        # How jumpy was it? Std of the 1 minute % moves, % instead of dollars so 2017 and 2024 are comparable
+        episode_df['pre_news_volatility'] = pre_news['close'].pct_change().std() * 100
+
+        # Average volume before the news, NOT a feature by itself (BTC volume in 2017 vs 2024 is a different world)
+        # It's just the baseline for the volume ratio below
+        pre_news_avg_volume = pre_news['volume'].mean()
+        if pre_news_avg_volume == 0:
+            continue # Dead market (happens in early 2017 data), can't divide by zero so skip it
+
+        # 8. REACTION FEATURES (how the market is reacting so far, only ever looking BACKWARDS from each candle)
+        # Momentum over the last 5 candles, shift(5) grabs the close from 5 rows earlier
+        episode_df['return_last_5m_pct'] = (episode_df['close'] - episode_df['close'].shift(5)) / episode_df['close'].shift(5) * 100
+
+        # Highest high and lowest low since the news dropped, as a % away from the release price
+        # .where() blanks out the pre-news candles, cummax/cummin = "biggest/smallest value SO FAR" so no peeking ahead
+        since_release = episode_df['minutes_from_release'] >= 0
+        episode_df['high_since_release_pct'] = (episode_df['high'].where(since_release).cummax() - price_at_release) / price_at_release * 100
+        episode_df['low_since_release_pct'] = (episode_df['low'].where(since_release).cummin() - price_at_release) / price_at_release * 100
+
+        # Is the volume after the news bigger than usual? 3.0 = three times the pre-news average
+        # expanding().mean() = average of every candle from T=0 up to this one
+        episode_df['volume_ratio_since_release'] = episode_df['volume'].where(since_release).expanding().mean() / pre_news_avg_volume
+
+        # 9. Engineer the Dynamic Target (For rows after T=0)
         # If I enter a trade right now, what is the return at the end of the episode (T+60)?
         price_at_end = episode_df.iloc[-1]['close']
         episode_df['target_return_to_end_pct'] = (price_at_end - episode_df['close']) / episode_df['close'] * 100
