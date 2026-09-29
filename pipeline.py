@@ -55,6 +55,11 @@ def clean_economic_data(csv_path="Economic_calendar_US.csv"):
     # If you couldnt calculate the surprise just drop it altogether
     df = df.dropna(subset=['surprise']).copy()
 
+    # Chop off the month/quarter tag so the same report is ONE category across every month
+    # "Chicago PMI  (Sep)" -> "Chicago PMI", "GDP (QoQ)  (Q3)" -> "GDP (QoQ)"
+    # We keep tags like (MoM) and (YoY) because those are actually different reports
+    df['event'] = df['event'].str.replace(r'\s*\((Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Q[1-4])\)\s*$', '', regex=True).str.strip()
+
     df = df.sort_values('datetime').reset_index(drop=True)
     
     # Keep only what we need for the model
