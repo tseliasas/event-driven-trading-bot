@@ -10,6 +10,7 @@ IMPORTANCE_GROUPS = [['high'], ['medium'], ['low'], ['high', 'medium'], ['high',
 USE_EVENT = False # False = the model can't see the report's NAME, so it can't just memorise "BTC went up after Factory Orders"
 categorical = ['importance'] + (['event'] if USE_EVENT else [])
 
+SIDES = ['long', 'short'] # long = buy and profit if it goes UP, short = sell and profit if it goes DOWN
 num = ['surprise', 'surprise_score', 'minutes_from_release', 'pct_change_since_release','pre_news_return_pct','pre_news_volatility','return_last_5m_pct','high_since_release_pct','low_since_release_pct','volume_ratio_since_release']
 
 FEE_PCT = 0.1
@@ -33,7 +34,7 @@ def add_episode_id(df):
 
     return df
 
-def add_barrier_labels(df, sl_mult):
+def add_barrier_labels(df, sl_mult, side):
     df = df.copy() # We run this once per stop size, so don't mess up the original
 
     # How far away the stop is (in %), wider when the market was jumpy before the news
@@ -55,21 +56,28 @@ def add_barrier_labels(df, sl_mult):
 
         for i in range(len(ep) - 1): # imagine we buy at every candle except for the last one
             entry = close[i]
-            stop_price = entry * (1 - sl / 100)
-            target_price = entry * (1 + tp / 100)
 
             # Only candles AFTER the entry can hit anything
             future_low = low[i + 1:]
             future_high = high[i + 1:]
 
             # np.flatnonzero = the positions where it's True, [0] = the first one
-            sl_hits = np.flatnonzero(future_low <= stop_price)
-            tp_hits = np.flatnonzero(future_high >= target_price)
+            if side == 'long':
+                # LONG: stop BELOW the entry, target ABOVE
+                sl_hits = np.flatnonzero(future_low <= entry * (1 - sl / 100))
+                tp_hits = np.flatnonzero(future_high >= entry * (1 + tp / 100))
+                time_exit = (close[-1] - entry) / entry * 100
+            else:
+                # SHORT: everything flipped, stop ABOVE the entry, target BELOW, we make money when it drops
+                sl_hits = np.flatnonzero(future_high >= entry * (1 + sl / 100))
+                tp_hits = np.flatnonzero(future_low <= entry * (1 - tp / 100))
+                time_exit = (entry - close[-1]) / entry * 100
+
             first_sl = sl_hits[0] if len(sl_hits) > 0 else 999 # 999 = never hit
             first_tp = tp_hits[0] if len(tp_hits) > 0 else 999
 
             if first_sl == 999 and first_tp == 999:
-                outcome = (close[-1] - entry) / entry * 100 # Neither hit, sell at T+60
+                outcome = time_exit # Neither hit, close the trade at T+60
                 hit_tp = 0
             elif first_sl <= first_tp: # Stop first, OR both in the same candle (assume the worst)
                 outcome = -sl
@@ -161,31 +169,34 @@ df = add_episode_id(df)
 
 results = []
 
-for sl_mult in SL_MULTS:
-    print(f"\n===== Stop = {sl_mult} x volatility | TP = {sl_mult * RR} x volatility =====")
+for side in SIDES:
+    for sl_mult in SL_MULTS:
+        print(f"\n===== {side.upper()} | Stop = {sl_mult} x volatility | TP = {sl_mult * RR} x volatility =====")
 
-    labeled = add_barrier_labels(df, sl_mult)
-    train_df, val_df, test_df = split_by_time(labeled)
+        labeled = add_barrier_labels(df, sl_mult, side)
+        train_df, val_df, test_df = split_by_time(labeled)
 
-    X_train, y_train = get_X_y(train_df)
-    pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
-    model = build_model(pos_weight)
-    model.fit(X_train, y_train)
+        X_train, y_train = get_X_y(train_df)
+        pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
+        model = build_model(pos_weight)
+        model.fit(X_train, y_train)
 
-    for levels in IMPORTANCE_GROUPS:
-        threshold = pick_threshold(model, val_df, levels)
-        if threshold is None:
-            continue
+        for levels in IMPORTANCE_GROUPS:
+            threshold = pick_threshold(model, val_df, levels)
+            if threshold is None:
+                continue
 
-        val_total = replay(model, val_df, threshold, levels).sum()
-        results.append({'sl_mult': sl_mult, 'levels': levels, 'threshold': threshold, 'val_total': val_total, 'model': model, 'test_df': test_df})
+            profits = replay(model, val_df, threshold, levels)
+            results.append({'side': side, 'sl_mult': sl_mult, 'levels': levels, 'threshold': threshold,
+                            'val_total': profits.sum(), 'val_avg': profits.mean(), 'val_trades': len(profits),
+                            'model': model, 'test_df': test_df})
 
-print("\n===== SUMMARY (best threshold per stop size + group, validation) =====")
+print(f"\n===== SUMMARY (validation) | event name used as a feature: {USE_EVENT} =====")
 for r in sorted(results, key=lambda r: r['val_total'], reverse=True):
-    print(f"  stop {r['sl_mult']:>2}x | {str(r['levels']):<28} | threshold {r['threshold']} | total {r['val_total']:.1f}%")
+    print(f"  {r['side']:<5} | stop {r['sl_mult']:>2}x | {str(r['levels']):<28} | threshold {r['threshold']:<4} | {r['val_trades']:>3} trades | avg {r['val_avg']:.3f}% | total {r['val_total']:.1f}%")
 
 best = max(results, key=lambda r: r['val_total'])
-print(f"\nBest on validation: stop {best['sl_mult']}x, {best['levels']}, threshold {best['threshold']}, total {best['val_total']:.1f}%")
+print(f"\nBest on validation: {best['side']}, stop {best['sl_mult']}x, {best['levels']}, threshold {best['threshold']}, total {best['val_total']:.1f}%")
 
 if best['val_total'] <= 0:
     print("Nothing made money on validation -> not opening the test set yet")
