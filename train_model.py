@@ -5,6 +5,8 @@ from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from xgboost import XGBClassifier
 
+IMPORTANCE_GROUPS = [['high'], ['medium'], ['low'], ['high', 'medium'], ['high', 'low'], ['medium', 'low'], ['high', 'medium', 'low']]
+
 categorical = ['event', 'importance']
 num = ['surprise', 'minutes_from_release', 'pct_change_since_release','pre_news_return_pct','pre_news_volatility','return_last_5m_pct','high_since_release_pct','low_since_release_pct','volume_ratio_since_release']
 
@@ -115,8 +117,9 @@ def build_model(pos_weight):
 
     return model
 
-def replay(model, df, threshold):
+def replay(model, df, threshold, levels):
     df = df.dropna(subset=['target_hit_tp']).copy()
+    df = df[df['importance'].isin(levels)]
 
     X, y = get_X_y(df)
     df['proba'] = model.predict_proba(X)[:,1]
@@ -131,13 +134,13 @@ def replay(model, df, threshold):
 
     return trades['trade_outcome'] - FEE_PCT
 
-def pick_threshold(model, val_df):
-    print("\nThreshold search (validation):")
+def pick_threshold(model, val_df, levels):
+    print(f"\nThreshold search (validation) | trading only: {levels}")
     best_threshold = None
     best_total = float('-inf') # -infinity so the first real result always beats it
 
     for threshold in [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9]:
-        profits = replay(model, val_df, threshold)
+        profits = replay(model, val_df, threshold, levels)
 
         if len(profits) < 30:
             continue
@@ -167,18 +170,23 @@ for sl_mult in SL_MULTS:
     model = build_model(pos_weight)
     model.fit(X_train, y_train)
 
-    threshold = pick_threshold(model, val_df)
-    if threshold is None:
-        continue
+    for levels in IMPORTANCE_GROUPS:
+        threshold = pick_threshold(model, val_df, levels)
+        if threshold is None:
+            continue
 
-    val_total = replay(model, val_df, threshold).sum()
-    results.append({'sl_mult': sl_mult, 'threshold': threshold, 'val_total': val_total, 'model': model, 'test_df': test_df})
+        val_total = replay(model, val_df, threshold, levels).sum()
+        results.append({'sl_mult': sl_mult, 'levels': levels, 'threshold': threshold, 'val_total': val_total, 'model': model, 'test_df': test_df})
+
+print("\n===== SUMMARY (best threshold per stop size + group, validation) =====")
+for r in sorted(results, key=lambda r: r['val_total'], reverse=True):
+    print(f"  stop {r['sl_mult']:>2}x | {str(r['levels']):<28} | threshold {r['threshold']} | total {r['val_total']:.1f}%")
 
 best = max(results, key=lambda r: r['val_total'])
-print(f"\nBest on validation: stop {best['sl_mult']}x, threshold {best['threshold']}, total {best['val_total']:.1f}%")
+print(f"\nBest on validation: stop {best['sl_mult']}x, {best['levels']}, threshold {best['threshold']}, total {best['val_total']:.1f}%")
 
 if best['val_total'] <= 0:
     print("Nothing made money on validation -> not opening the test set yet")
 else:
-    profits = replay(best['model'], best['test_df'], best['threshold'])
+    profits = replay(best['model'], best['test_df'], best['threshold'], best['levels'])
     print(f"TEST: {len(profits)} trades | win rate {(profits > 0).mean():.1%} | avg {profits.mean():.3f}% | total {profits.sum():.1f}%")
