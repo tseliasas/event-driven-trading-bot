@@ -1,17 +1,23 @@
 import pandas as pd
+import numpy as np
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from xgboost import XGBClassifier
-from sklearn.metrics import classification_report, accuracy_score
+
 
 categorical = ['event', 'importance']
 num = ['surprise', 'minutes_from_release', 'pct_change_since_release','pre_news_return_pct','pre_news_volatility','return_last_5m_pct','high_since_release_pct','low_since_release_pct','volume_ratio_since_release']
 
+FEE_PCT = 0.1
+RR = 2
+SL_MULTS = [3, 5, 8, 12]   # stop sizes to try, in multiples of pre_news_volatility
+MIN_SL_PCT = 0.3   # min sl
+
+
 def load_data(csv_path="XGBoost_Episodic_Data.csv"):
     df = pd.read_csv(csv_path)
-    df = df.dropna(subset=['target_return_to_end_pct'])
-    df = df[df['minutes_from_release']!=60].copy()
+    df = df[df['minutes_from_release'] >= 1].copy()
 
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.sort_values('timestamp').reset_index(drop=True)
@@ -24,52 +30,66 @@ def add_episode_id(df):
 
     return df
 
-def split_by_time(df, test_frac=0.2):
-    unique_times = df['release_time'].drop_duplicates().sort_values().reset_index(drop=True)
-    cut_position = int(len(unique_times) * (1 - test_frac))
-    cutoff = unique_times.iloc[cut_position]
+def add_barrier_labels(df, sl_mult):
+    df = df.copy() # We run this once per stop size, so don't mess up the original
 
-    train_df = df[df['release_time'] < cutoff].copy()
-    test_df = df[df['release_time'] >= cutoff].copy()
+    # How far away the stop is (in %), wider when the market was jumpy before the news
+    df['sl_pct'] = df['pre_news_volatility'] * sl_mult
+    df['sl_pct'] = df['sl_pct'].clip(lower=MIN_SL_PCT) # clip(lower=x) = anything smaller than x becomes x
+    df['tp_pct'] = df['sl_pct'] * RR
 
-    return train_df, test_df
+    candles = df.drop_duplicates(subset=['release_time', 'minutes_from_release'])
 
-def get_X_y(df):
-    X = df[categorical + num]
-    y = df['target_direction']
+    results = []
 
-    return X, y
+    for release_time, ep in candles.groupby('release_time'):
+        high = ep['high'].to_numpy() # to_numpy() means plain array...faster to loop through
+        low = ep['low'].to_numpy()
+        close = ep['close'].to_numpy()
+        minutes = ep['minutes_from_release'].to_numpy()
+        sl = ep['sl_pct'].iloc[0] # Same for the whole episode
+        tp = ep['tp_pct'].iloc[0]
 
-def build_model():
-    preprocessor = ColumnTransformer(transformers=[
-        ('num', StandardScaler(), num),
-        ('cat', OneHotEncoder(handle_unknown='ignore'), categorical)
-    ])
+        for i in range(len(ep) - 1): # imagine we buy at every candle except for the last one
+            entry = close[i]
+            stop_price = entry * (1 - sl / 100)
+            target_price = entry * (1 + tp / 100)
 
-    model = Pipeline(steps=[
-        ('preprocessor', preprocessor),
-        ('classifier', XGBClassifier(n_estimators=100, learning_rate=0.1, max_depth=5)),
-    ])
+            # Only candles AFTER the entry can hit anything
+            future_low = low[i + 1:]
+            future_high = high[i + 1:]
 
-    return model
+            # np.flatnonzero = the positions where it's True, [0] = the first one
+            sl_hits = np.flatnonzero(future_low <= stop_price)
+            tp_hits = np.flatnonzero(future_high >= target_price)
+            first_sl = sl_hits[0] if len(sl_hits) > 0 else 999 # 999 = never hit
+            first_tp = tp_hits[0] if len(tp_hits) > 0 else 999
 
-def train_and_score(train_df, test_df):
-    X_train, y_train = get_X_y(train_df)
-    X_test, y_test = get_X_y(test_df)
+            if first_sl == 999 and first_tp == 999:
+                outcome = (close[-1] - entry) / entry * 100 # Neither hit, sell at T+60
+                hit_tp = 0
+            elif first_sl <= first_tp: # Stop first, OR both in the same candle (assume the worst)
+                outcome = -sl
+                hit_tp = 0
+            else:
+                outcome = tp
+                hit_tp = 1
 
-    model = build_model()
-    model.fit(X_train, y_train)
+            results.append((release_time, minutes[i], outcome, hit_tp))
 
-    predictions = model.predict(X_test)
+    # 6. Glue the answers back onto every row (minute 60 gets NaN because it's never an entry)
+    results_df = pd.DataFrame(results, columns=['release_time', 'minutes_from_release', 'trade_outcome_pct', 'target_hit_tp'])
+    df = df.merge(results_df, on=['release_time', 'minutes_from_release'], how='left')
 
-    print("Accuracy:", accuracy_score(y_test, predictions))
-    print(classification_report(y_test, predictions))
-
-    print("Always-buy baseline:", y_test.mean())
-
-    return model
+    return df
 
 df = load_data()
+print(len(df))
+print(df['minutes_from_release'].min(), df['minutes_from_release'].max())
+
 df = add_episode_id(df)
-train_df, test_df = split_by_time(df)
-model = train_and_score(train_df, test_df)
+
+labeled = add_barrier_labels(df, 5)
+print(labeled['target_hit_tp'].isna().sum()) # should be 10193 (one minute-60 row per episode)
+print(labeled['target_hit_tp'].mean()) # share of minutes where TP came first
+print(labeled['trade_outcome_pct'].describe())
