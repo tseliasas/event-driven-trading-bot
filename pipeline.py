@@ -61,9 +61,17 @@ def clean_economic_data(csv_path="Economic_calendar_US.csv"):
     df['event'] = df['event'].str.replace(r'\s*\((Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Q[1-4])\)\s*$', '', regex=True).str.strip()
 
     df = df.sort_values('datetime').reset_index(drop=True)
-    
+
+    # SURPRISE SCORE: how big is this surprise compared to what's NORMAL for this exact report?
+    # Raw surprise is in each report's own units (NFP +50,000 jobs vs CPI +0.1%) so they can't be compared
+    # "Normal" = the average size of this report's surprises in its PAST releases only
+    # shift(1) kicks out the current release so we never use the number we're trying to score (no peeking)
+    # min_periods=5 = need at least 5 past releases before we trust the "normal", otherwise NaN
+    past_normal = df.groupby('event')['surprise'].transform(lambda s: s.abs().expanding(min_periods=5).mean().shift(1))
+    df['surprise_score'] = df['surprise'] / past_normal.replace(0, np.nan) # A report that's never surprised before -> NaN instead of dividing by 0
+
     # Keep only what we need for the model
-    df = df[['datetime', 'event', 'importance', 'actual', 'forecast', 'surprise']]
+    df = df[['datetime', 'event', 'importance', 'actual', 'forecast', 'surprise', 'surprise_score']]
     
     return df
 
@@ -108,7 +116,8 @@ def build_episodic_dataset():
         episode_df['event'] = news_row['event']
         episode_df['importance'] = news_row['importance']
         episode_df['surprise'] = news_row['surprise']
-        
+        episode_df['surprise_score'] = news_row['surprise_score']
+
         # 5. Create the "Clock" feature
         # Calculate how many minutes each row is from the actual release time (T=0)
         episode_df['minutes_from_release'] = (episode_df.index - news_time).total_seconds() / 60.0

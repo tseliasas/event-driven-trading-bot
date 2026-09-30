@@ -8,7 +8,7 @@ from xgboost import XGBClassifier
 IMPORTANCE_GROUPS = [['high'], ['medium'], ['low'], ['high', 'medium'], ['high', 'low'], ['medium', 'low'], ['high', 'medium', 'low']]
 
 categorical = ['event', 'importance']
-num = ['surprise', 'minutes_from_release', 'pct_change_since_release','pre_news_return_pct','pre_news_volatility','return_last_5m_pct','high_since_release_pct','low_since_release_pct','volume_ratio_since_release']
+num = ['surprise', 'surprise_score', 'minutes_from_release', 'pct_change_since_release','pre_news_return_pct','pre_news_volatility','return_last_5m_pct','high_since_release_pct','low_since_release_pct','volume_ratio_since_release']
 
 FEE_PCT = 0.1
 RR = 2
