@@ -164,42 +164,43 @@ def pick_threshold(model, val_df, levels):
 
     return best_threshold
 
-df = load_data()
-df = add_episode_id(df)
+if __name__ == "__main__":
+    df = load_data()
+    df = add_episode_id(df)
 
-results = []
+    results = []
 
-for side in SIDES:
-    for sl_mult in SL_MULTS:
-        print(f"\n===== {side.upper()} | Stop = {sl_mult} x volatility | TP = {sl_mult * RR} x volatility =====")
+    for side in SIDES:
+        for sl_mult in SL_MULTS:
+            print(f"\n===== {side.upper()} | Stop = {sl_mult} x volatility | TP = {sl_mult * RR} x volatility =====")
 
-        labeled = add_barrier_labels(df, sl_mult, side)
-        train_df, val_df, test_df = split_by_time(labeled)
+            labeled = add_barrier_labels(df, sl_mult, side)
+            train_df, val_df, test_df = split_by_time(labeled)
 
-        X_train, y_train = get_X_y(train_df)
-        pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
-        model = build_model(pos_weight)
-        model.fit(X_train, y_train)
+            X_train, y_train = get_X_y(train_df)
+            pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
+            model = build_model(pos_weight)
+            model.fit(X_train, y_train)
 
-        for levels in IMPORTANCE_GROUPS:
-            threshold = pick_threshold(model, val_df, levels)
-            if threshold is None:
-                continue
+            for levels in IMPORTANCE_GROUPS:
+                threshold = pick_threshold(model, val_df, levels)
+                if threshold is None:
+                    continue
 
-            profits = replay(model, val_df, threshold, levels)
-            results.append({'side': side, 'sl_mult': sl_mult, 'levels': levels, 'threshold': threshold,
-                            'val_total': profits.sum(), 'val_avg': profits.mean(), 'val_trades': len(profits),
-                            'model': model, 'test_df': test_df})
+                profits = replay(model, val_df, threshold, levels)
+                results.append({'side': side, 'sl_mult': sl_mult, 'levels': levels, 'threshold': threshold,
+                                'val_total': profits.sum(), 'val_avg': profits.mean(), 'val_trades': len(profits),
+                                'model': model, 'test_df': test_df})
 
-print(f"\n===== SUMMARY (validation) | event name used as a feature: {USE_EVENT} =====")
-for r in sorted(results, key=lambda r: r['val_total'], reverse=True):
-    print(f"  {r['side']:<5} | stop {r['sl_mult']:>2}x | {str(r['levels']):<28} | threshold {r['threshold']:<4} | {r['val_trades']:>3} trades | avg {r['val_avg']:.3f}% | total {r['val_total']:.1f}%")
+    print(f"\n===== SUMMARY (validation) | event name used as a feature: {USE_EVENT} =====")
+    for r in sorted(results, key=lambda r: r['val_total'], reverse=True):
+        print(f"  {r['side']:<5} | stop {r['sl_mult']:>2}x | {str(r['levels']):<28} | threshold {r['threshold']:<4} | {r['val_trades']:>3} trades | avg {r['val_avg']:.3f}% | total {r['val_total']:.1f}%")
 
-best = max(results, key=lambda r: r['val_total'])
-print(f"\nBest on validation: {best['side']}, stop {best['sl_mult']}x, {best['levels']}, threshold {best['threshold']}, total {best['val_total']:.1f}%")
+    best = max(results, key=lambda r: r['val_total'])
+    print(f"\nBest on validation: {best['side']}, stop {best['sl_mult']}x, {best['levels']}, threshold {best['threshold']}, total {best['val_total']:.1f}%")
 
-if best['val_total'] <= 0:
-    print("Nothing made money on validation -> not opening the test set yet")
-else:
-    profits = replay(best['model'], best['test_df'], best['threshold'], best['levels'])
-    print(f"TEST: {len(profits)} trades | win rate {(profits > 0).mean():.1%} | avg {profits.mean():.3f}% | total {profits.sum():.1f}%")
+    if best['val_total'] <= 0:
+        print("Nothing made money on validation -> not opening the test set yet")
+    else:
+        profits = replay(best['model'], best['test_df'], best['threshold'], best['levels'])
+        print(f"TEST: {len(profits)} trades | win rate {(profits > 0).mean():.1%} | avg {profits.mean():.3f}% | total {profits.sum():.1f}%")
