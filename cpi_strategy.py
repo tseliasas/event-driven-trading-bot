@@ -38,3 +38,36 @@ summary['short_avg'] = summary['short_avg'] - FEE_PCT
 
 print(f"{len(history)} CPI releases studied, {len(holdout)} locked away\n")
 print(summary.round(3))
+
+SCORE_MIN = 1
+EMERGENCY_STOP_PCT = 2
+
+candles = cpi.drop_duplicates(['release_time', 'minutes_from_release'])
+close = candles.pivot(index='release_time', columns='minutes_from_release', values='close')
+high = candles.pivot(index='release_time', columns='minutes_from_release', values='high')
+
+
+def short_result(release_time):
+    entry = close.loc[release_time, 1]
+    stop_price = entry * (1 + EMERGENCY_STOP_PCT / 100)
+    later_highs = high.loc[release_time, 2:60]
+
+    if (later_highs >= stop_price).any():
+        return -EMERGENCY_STOP_PCT
+    return (entry - close.loc[release_time, 60]) / entry * 100
+
+
+def run_rule(part, label):
+    trades = part[part['score'] > SCORE_MIN]
+    results = pd.Series([short_result(t) for t in trades.index], index=trades.index, dtype=float) - FEE_PCT
+
+    print(f"\n===== {label}: short if score > {SCORE_MIN}, enter minute 1, exit T+60, emergency stop {EMERGENCY_STOP_PCT}% =====")
+    print(f"{len(part)} CPI releases | {len(results)} trades | win rate {(results > 0).mean():.0%} | avg {results.mean():.3f}% | total {results.sum():.2f}%")
+    for t, r in results.items():
+        print(f"  {t:%Y-%m-%d} | score {trades.loc[t, 'score']:+.2f} | {r:+.3f}%")
+
+    return results
+
+
+run_rule(history, "HISTORY")
+run_rule(holdout, "HOLDOUT (first and only look)")
